@@ -46,6 +46,8 @@ llvm_config.use_clang()
 config.substitutions.append(
     ('%src_include_dir', config.clang_src_dir + '/include'))
 
+config.substitutions.append(
+    ('%target_triple', config.target_triple))
 
 # Propagate path to symbolizer for ASan/MSan.
 llvm_config.with_system_environment(
@@ -61,7 +63,8 @@ config.substitutions.append(('%PATH%', config.environment['PATH']))
 tool_dirs = [config.clang_tools_dir, config.llvm_tools_dir]
 
 tools = [
-    'c-index-test', 'clang-diff', 'clang-format', 'clang-tblgen', 'opt', 'llvm-ifs',
+    'apinotes-test', 'c-index-test', 'clang-diff', 'clang-format',
+    'clang-tblgen', 'opt', 'llvm-ifs', 'yaml2obj',
     ToolSubst('%clang_extdef_map', command=FindTool(
         'clang-extdef-mapping'), unresolved='ignore'),
 ]
@@ -88,6 +91,7 @@ llvm_config.add_tool_substitutions(tools, tool_dirs)
 config.substitutions.append(
     ('%hmaptool', "'%s' %s" % (config.python_executable,
                              os.path.join(config.clang_tools_dir, 'hmaptool'))))
+
 
 # Plugins (loadable modules)
 if config.has_plugins and config.llvm_plugin_ext:
@@ -163,6 +167,12 @@ if re.match(r'^arm64(e)?-apple-(macos|darwin)', config.target_triple):
 # only if all handles were closed.
 if platform.system() not in ['Windows']:
     config.available_features.add('can-remove-opened-file')
+
+# Features
+known_arches = ["x86_64", "mips64", "ppc64", "aarch64"]
+if (any(config.target_triple.startswith(x) for x in known_arches)):
+  config.available_features.add("clang-target-64-bits")
+
 
 
 def calculate_arch_features(arch_string):

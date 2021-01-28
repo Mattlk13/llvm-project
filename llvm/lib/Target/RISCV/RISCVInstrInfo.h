@@ -83,6 +83,9 @@ public:
 
   bool isAsCheapAsAMove(const MachineInstr &MI) const override;
 
+  Optional<DestSourcePair>
+  isCopyInstrImpl(const MachineInstr &MI) const override;
+
   bool verifyInstruction(const MachineInstr &MI,
                          StringRef &ErrInfo) const override;
 
@@ -134,23 +137,17 @@ protected:
   const RISCVSubtarget &STI;
 };
 
-namespace RISCV {
-// Match with the definitions in RISCVInstrFormatsV.td
-enum RVVConstraintType {
-  NoConstraint = 0,
-  WidenV = 1,
-  WidenW = 2,
-  WidenCvt = 3,
-  Narrow = 4,
-  Iota = 5,
-  SlideUp = 6,
-  Vrgather = 7,
-  Vcompress = 8,
+namespace RISCVVPseudosTable {
 
-  ConstraintOffset = 5,
-  ConstraintMask = 0b1111
+struct PseudoInfo {
+  uint16_t Pseudo;
+  uint16_t BaseInstr;
 };
-} // end namespace RISCV
+
+#define GET_RISCVVPseudosTable_DECL
+#include "RISCVGenSearchableTables.inc"
+
+} // end namespace RISCVVPseudosTable
 
 } // end namespace llvm
 #endif

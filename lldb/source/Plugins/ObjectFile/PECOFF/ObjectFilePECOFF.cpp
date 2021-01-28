@@ -43,45 +43,16 @@ using namespace lldb_private;
 
 LLDB_PLUGIN_DEFINE(ObjectFilePECOFF)
 
-struct CVInfoPdb70 {
-  // 16-byte GUID
-  struct _Guid {
-    llvm::support::ulittle32_t Data1;
-    llvm::support::ulittle16_t Data2;
-    llvm::support::ulittle16_t Data3;
-    uint8_t Data4[8];
-  } Guid;
-
-  llvm::support::ulittle32_t Age;
-};
-
 static UUID GetCoffUUID(llvm::object::COFFObjectFile &coff_obj) {
   const llvm::codeview::DebugInfo *pdb_info = nullptr;
   llvm::StringRef pdb_file;
 
-  // This part is similar with what has done in minidump parser.
   if (!coff_obj.getDebugPDBInfo(pdb_info, pdb_file) && pdb_info) {
     if (pdb_info->PDB70.CVSignature == llvm::OMF::Signature::PDB70) {
-      using llvm::support::endian::read16be;
-      using llvm::support::endian::read32be;
-
-      const uint8_t *sig = pdb_info->PDB70.Signature;
-      struct CVInfoPdb70 info;
-      info.Guid.Data1 = read32be(sig);
-      sig += 4;
-      info.Guid.Data2 = read16be(sig);
-      sig += 2;
-      info.Guid.Data3 = read16be(sig);
-      sig += 2;
-      memcpy(info.Guid.Data4, sig, 8);
-
-      // Return 20-byte UUID if the Age is not zero
-      if (pdb_info->PDB70.Age) {
-        info.Age = read32be(&pdb_info->PDB70.Age);
-        return UUID::fromOptionalData(&info, sizeof(info));
-      }
-      // Otherwise return 16-byte GUID
-      return UUID::fromOptionalData(&info.Guid, sizeof(info.Guid));
+      UUID::CvRecordPdb70 info;
+      memcpy(&info.Uuid, pdb_info->PDB70.Signature, sizeof(info.Uuid));
+      info.Age = pdb_info->PDB70.Age;
+      return UUID::fromCvRecord(info);
     }
   }
 
@@ -142,7 +113,6 @@ ObjectFile *ObjectFilePECOFF::CreateInstance(const lldb::ModuleSP &module_sp,
   // Cache coff binary.
   if (!objfile_up->CreateBinary())
     return nullptr;
-
   return objfile_up.release();
 }
 
@@ -169,8 +139,9 @@ size_t ObjectFilePECOFF::GetModuleSpecifications(
 
   Log *log(GetLogIfAllCategoriesSet(LIBLLDB_LOG_OBJECT));
 
-  if (DataBufferSP full_sp = MapFileData(file, -1, file_offset))
-    data_sp = std::move(full_sp);
+  if (data_sp->GetByteSize() < length)
+    if (DataBufferSP full_sp = MapFileData(file, -1, file_offset))
+      data_sp = std::move(full_sp);
   auto binary = llvm::object::createBinary(llvm::MemoryBufferRef(
       toStringRef(data_sp->GetData()), file.GetFilename().GetStringRef()));
 
@@ -539,12 +510,9 @@ DataExtractor ObjectFilePECOFF::ReadImageData(uint32_t offset, size_t size) {
   if (!size)
     return {};
 
-  if (m_file) {
-    // A bit of a hack, but we intend to write to this buffer, so we can't
-    // mmap it.
-    auto buffer_sp = MapFileData(m_file, size, offset);
-    return DataExtractor(buffer_sp, GetByteOrder(), GetAddressByteSize());
-  }
+  if (m_data.ValidOffsetForDataOfSize(offset, size))
+    return DataExtractor(m_data, offset, size);
+
   ProcessSP process_sp(m_process_wp.lock());
   DataExtractor data;
   if (process_sp) {
@@ -562,13 +530,11 @@ DataExtractor ObjectFilePECOFF::ReadImageData(uint32_t offset, size_t size) {
 }
 
 DataExtractor ObjectFilePECOFF::ReadImageDataByRVA(uint32_t rva, size_t size) {
-  if (m_file) {
-    Address addr = GetAddress(rva);
-    SectionSP sect = addr.GetSection();
-    if (!sect)
-      return {};
-    rva = sect->GetFileOffset() + addr.GetOffset();
-  }
+  Address addr = GetAddress(rva);
+  SectionSP sect = addr.GetSection();
+  if (!sect)
+    return {};
+  rva = sect->GetFileOffset() + addr.GetOffset();
 
   return ReadImageData(rva, size);
 }
@@ -650,12 +616,6 @@ Symtab *ObjectFilePECOFF::GetSymtab() {
           DataExtractor strtab_data = ReadImageData(
               m_coff_header.symoff + symbol_data_size, strtab_size);
 
-          // First 4 bytes should be zeroed after strtab_size has been read,
-          // because it is used as offset 0 to encode a NULL string.
-          uint32_t *strtab_data_start = const_cast<uint32_t *>(
-              reinterpret_cast<const uint32_t *>(strtab_data.GetDataStart()));
-          strtab_data_start[0] = 0;
-
           offset = 0;
           std::string symbol_name;
           Symbol *symbols = m_symtab_up->Resize(num_syms);
@@ -696,7 +656,7 @@ Symtab *ObjectFilePECOFF::GetSymtab() {
 
             if (symbol.naux > 0) {
               i += symbol.naux;
-              offset += symbol_size;
+              offset += symbol.naux * symbol_size;
             }
           }
         }
@@ -862,7 +822,6 @@ void ObjectFilePECOFF::CreateSections(SectionList &unified_section_list) {
   if (m_sections_up)
     return;
   m_sections_up = std::make_unique<SectionList>();
-
   ModuleSP module_sp(GetModule());
   if (module_sp) {
     std::lock_guard<std::recursive_mutex> guard(module_sp->GetMutex());

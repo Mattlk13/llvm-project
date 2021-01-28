@@ -15,12 +15,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/FileCheck/FileCheck.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/FileCheck.h"
 #include <cmath>
 using namespace llvm;
 
@@ -76,6 +76,10 @@ static cl::opt<bool> AllowEmptyInput(
     "allow-empty", cl::init(false),
     cl::desc("Allow the input file to be empty. This is useful when making\n"
              "checks that some error message does not occur, for example."));
+
+static cl::opt<bool> AllowUnusedPrefixes(
+    "allow-unused-prefixes", cl::init(true),
+    cl::desc("Allow prefixes to be specified but not appear in the test."));
 
 static cl::opt<bool> MatchFullLines(
     "match-full-lines", cl::init(false),
@@ -140,12 +144,11 @@ enum DumpInputFilterValue {
 static cl::list<DumpInputFilterValue> DumpInputFilters(
     "dump-input-filter",
     cl::desc("In the dump requested by -dump-input, print only input lines of\n"
-             "kind <kind> plus any context specified by -dump-input-context.\n"
-             "When there are multiple occurrences of this option, the <kind>\n"
+             "kind <value> plus any context specified by -dump-input-context.\n"
+             "When there are multiple occurrences of this option, the <value>\n"
              "that appears earliest in the list below has precedence.  The\n"
              "default is 'error' when -dump-input=fail, and it's 'all' when\n"
              "-dump-input=always.\n"),
-    cl::value_desc("kind"),
     cl::values(clEnumValN(DumpInputFilterAll, "all", "All input lines"),
                clEnumValN(DumpInputFilterAnnotationFull, "annotation-full",
                           "Input lines with annotations"),
@@ -226,14 +229,21 @@ static void DumpInputAnnotationHelp(raw_ostream &OS) {
      << "explain the input dump printed by FileCheck.\n"
      << "\n"
      << "Related command-line options:\n"
+     << "\n"
      << "  - -dump-input=<value> enables or disables the input dump\n"
-     << "  - -dump-input-filter=<kind> filters the input lines\n"
+     << "  - -dump-input-filter=<value> filters the input lines\n"
      << "  - -dump-input-context=<N> adjusts the context of filtered lines\n"
      << "  - -v and -vv add more annotations\n"
      << "  - -color forces colors to be enabled both in the dump and below\n"
      << "  - -help documents the above options in more detail\n"
      << "\n"
-     << "Input dump annotation format:\n";
+     << "These options can also be set via FILECHECK_OPTS.  For example, for\n"
+     << "maximum debugging output on failures:\n"
+     << "\n"
+     << "  $ FILECHECK_OPTS='-dump-input-filter=all -vv -color' ninja check\n"
+     << "\n"
+     << "Input dump annotation format:\n"
+     << "\n";
 
   // Labels for input lines.
   OS << "  - ";
@@ -318,7 +328,7 @@ struct InputAnnotation {
 };
 
 /// Get an abbreviation for the check type.
-std::string GetCheckTypeAbbreviation(Check::FileCheckType Ty) {
+static std::string GetCheckTypeAbbreviation(Check::FileCheckType Ty) {
   switch (Ty) {
   case Check::CheckPlain:
     if (Ty.getCount() > 1)
@@ -396,6 +406,18 @@ BuildInputAnnotations(const SourceMgr &SM, unsigned CheckFileBufferID,
     LabelWidth = std::max((std::string::size_type)LabelWidth, A.Label.size());
 
     A.Marker = GetMarker(DiagItr->MatchTy);
+    if (!DiagItr->Note.empty()) {
+      A.Marker.Note = DiagItr->Note;
+      // It's less confusing if notes that don't actually have ranges don't have
+      // markers.  For example, a marker for 'with "VAR" equal to "5"' would
+      // seem to indicate where "VAR" matches, but the location we actually have
+      // for the marker simply points to the start of the match/search range for
+      // the full pattern of which the substitution is potentially just one
+      // component.
+      if (DiagItr->InputStartLine == DiagItr->InputEndLine &&
+          DiagItr->InputStartCol == DiagItr->InputEndCol)
+        A.Marker.Lead = ' ';
+    }
     A.FoundAndExpectedMatch =
         DiagItr->MatchTy == FileCheckDiag::MatchFoundAndExpected;
 
@@ -497,54 +519,54 @@ static void DumpAnnotatedInput(raw_ostream &OS, const FileCheckRequest &Req,
   OS << "Input was:\n<<<<<<\n";
 
   // Sort annotations.
-  std::sort(Annotations.begin(), Annotations.end(),
-            [](const InputAnnotation &A, const InputAnnotation &B) {
-              // 1. Sort annotations in the order of the input lines.
-              //
-              // This makes it easier to find relevant annotations while
-              // iterating input lines in the implementation below.  FileCheck
-              // does not always produce diagnostics in the order of input
-              // lines due to, for example, CHECK-DAG and CHECK-NOT.
-              if (A.InputLine != B.InputLine)
-                return A.InputLine < B.InputLine;
-              // 2. Sort annotations in the temporal order FileCheck produced
-              // their associated diagnostics.
-              //
-              // This sort offers several benefits:
-              //
-              // A. On a single input line, the order of annotations reflects
-              //    the FileCheck logic for processing directives/patterns.
-              //    This can be helpful in understanding cases in which the
-              //    order of the associated directives/patterns in the check
-              //    file or on the command line either (i) does not match the
-              //    temporal order in which FileCheck looks for matches for the
-              //    directives/patterns (due to, for example, CHECK-LABEL,
-              //    CHECK-NOT, or `--implicit-check-not`) or (ii) does match
-              //    that order but does not match the order of those
-              //    diagnostics along an input line (due to, for example,
-              //    CHECK-DAG).
-              //
-              //    On the other hand, because our presentation format presents
-              //    input lines in order, there's no clear way to offer the
-              //    same benefit across input lines.  For consistency, it might
-              //    then seem worthwhile to have annotations on a single line
-              //    also sorted in input order (that is, by input column).
-              //    However, in practice, this appears to be more confusing
-              //    than helpful.  Perhaps it's intuitive to expect annotations
-              //    to be listed in the temporal order in which they were
-              //    produced except in cases the presentation format obviously
-              //    and inherently cannot support it (that is, across input
-              //    lines).
-              //
-              // B. When diagnostics' annotations are split among multiple
-              //    input lines, the user must track them from one input line
-              //    to the next.  One property of the sort chosen here is that
-              //    it facilitates the user in this regard by ensuring the
-              //    following: when comparing any two input lines, a
-              //    diagnostic's annotations are sorted in the same position
-              //    relative to all other diagnostics' annotations.
-              return A.DiagIndex < B.DiagIndex;
-            });
+  llvm::sort(Annotations,
+             [](const InputAnnotation &A, const InputAnnotation &B) {
+               // 1. Sort annotations in the order of the input lines.
+               //
+               // This makes it easier to find relevant annotations while
+               // iterating input lines in the implementation below.  FileCheck
+               // does not always produce diagnostics in the order of input
+               // lines due to, for example, CHECK-DAG and CHECK-NOT.
+               if (A.InputLine != B.InputLine)
+                 return A.InputLine < B.InputLine;
+               // 2. Sort annotations in the temporal order FileCheck produced
+               // their associated diagnostics.
+               //
+               // This sort offers several benefits:
+               //
+               // A. On a single input line, the order of annotations reflects
+               //    the FileCheck logic for processing directives/patterns.
+               //    This can be helpful in understanding cases in which the
+               //    order of the associated directives/patterns in the check
+               //    file or on the command line either (i) does not match the
+               //    temporal order in which FileCheck looks for matches for the
+               //    directives/patterns (due to, for example, CHECK-LABEL,
+               //    CHECK-NOT, or `--implicit-check-not`) or (ii) does match
+               //    that order but does not match the order of those
+               //    diagnostics along an input line (due to, for example,
+               //    CHECK-DAG).
+               //
+               //    On the other hand, because our presentation format presents
+               //    input lines in order, there's no clear way to offer the
+               //    same benefit across input lines.  For consistency, it might
+               //    then seem worthwhile to have annotations on a single line
+               //    also sorted in input order (that is, by input column).
+               //    However, in practice, this appears to be more confusing
+               //    than helpful.  Perhaps it's intuitive to expect annotations
+               //    to be listed in the temporal order in which they were
+               //    produced except in cases the presentation format obviously
+               //    and inherently cannot support it (that is, across input
+               //    lines).
+               //
+               // B. When diagnostics' annotations are split among multiple
+               //    input lines, the user must track them from one input line
+               //    to the next.  One property of the sort chosen here is that
+               //    it facilitates the user in this regard by ensuring the
+               //    following: when comparing any two input lines, a
+               //    diagnostic's annotations are sorted in the same position
+               //    relative to all other diagnostics' annotations.
+               return A.DiagIndex < B.DiagIndex;
+             });
 
   // Compute the width of the label column.
   const unsigned char *InputFilePtr = InputFileText.bytes_begin(),
@@ -753,6 +775,7 @@ int main(int argc, char **argv) {
     return 2;
 
   Req.AllowEmptyInput = AllowEmptyInput;
+  Req.AllowUnusedPrefixes = AllowUnusedPrefixes;
   Req.EnableVarScope = EnableVarScope;
   Req.AllowDeprecatedDagOverlap = AllowDeprecatedDagOverlap;
   Req.Verbose = Verbose;

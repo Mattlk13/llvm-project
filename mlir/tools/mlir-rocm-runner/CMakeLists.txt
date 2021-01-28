@@ -38,7 +38,7 @@ if(MLIR_ROCM_RUNNER_ENABLED)
   add_definitions(-D__ROCM_PATH__="${ROCM_PATH}")
 
   # Locate HIP runtime library.
-  find_library(ROCM_RUNTIME_LIBRARY hip_hcc
+  find_library(ROCM_RUNTIME_LIBRARY amdhip64
                PATHS "${HIP_PATH}/lib")
   if (NOT ROCM_RUNTIME_LIBRARY)
     message(SEND_ERROR "Could not locate ROCm HIP runtime library")
@@ -49,18 +49,19 @@ if(MLIR_ROCM_RUNNER_ENABLED)
   # Set HIP compile-time flags.
   add_definitions(-D__HIP_PLATFORM_HCC__)
 
-  add_llvm_library(rocm-runtime-wrappers SHARED
+  add_mlir_library(rocm-runtime-wrappers
+    SHARED
     rocm-runtime-wrappers.cpp
+
+    EXCLUDE_FROM_LIBMLIR
   )
   target_include_directories(rocm-runtime-wrappers
     PRIVATE
     "${HIP_PATH}/../include"
     "${HIP_PATH}/include"
-    LLVMSupport
   )
   target_link_libraries(rocm-runtime-wrappers
-    PUBLIC
-    LLVMSupport
+    PRIVATE
     ${ROCM_RUNTIME_LIBRARY}
   )
 
@@ -72,12 +73,6 @@ if(MLIR_ROCM_RUNNER_ENABLED)
     lldCommon
     lldDriver
     lldELF
-    LLVMCore
-    LLVMLTO
-    LLVMMC
-    LLVMMCParser
-    LLVMOption
-    LLVMSupport
     MLIRJitRunner
     MLIRAnalysis
     MLIREDSC
@@ -109,6 +104,15 @@ if(MLIR_ROCM_RUNNER_ENABLED)
 
     DEPENDS
     rocm-runtime-wrappers
+
+    LINK_COMPONENTS
+
+    Core
+    LTO
+    MC
+    MCParser
+    Option
+    Support
     )
   llvm_update_compile_flags(mlir-rocm-runner)
   target_include_directories(mlir-rocm-runner

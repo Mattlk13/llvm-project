@@ -50,15 +50,18 @@ MachineSSAUpdater::~MachineSSAUpdater() {
 }
 
 /// Initialize - Reset this object to get ready for a new set of SSA
-/// updates.  ProtoValue is the value used to name PHI nodes.
-void MachineSSAUpdater::Initialize(Register V) {
+/// updates.
+void MachineSSAUpdater::Initialize(const TargetRegisterClass *RC) {
   if (!AV)
     AV = new AvailableValsTy();
   else
     getAvailableVals(AV).clear();
 
-  VR = V;
-  VRC = MRI->getRegClass(VR);
+  VRC = RC;
+}
+
+void MachineSSAUpdater::Initialize(Register V) {
+  Initialize(MRI->getRegClass(V));
 }
 
 /// HasValueForBlock - Return true if the MachineSSAUpdater already has a value for
@@ -281,9 +284,7 @@ public:
   /// vector.
   static void FindPredecessorBlocks(MachineBasicBlock *BB,
                                     SmallVectorImpl<MachineBasicBlock*> *Preds){
-    for (MachineBasicBlock::pred_iterator PI = BB->pred_begin(),
-           E = BB->pred_end(); PI != E; ++PI)
-      Preds->push_back(*PI);
+    append_range(*Preds, BB->predecessors());
   }
 
   /// GetUndefVal - Create an IMPLICIT_DEF instruction with a new register.

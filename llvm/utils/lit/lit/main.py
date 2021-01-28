@@ -39,7 +39,8 @@ def main(builtin_params={}):
         config_prefix=opts.configPrefix,
         echo_all_commands=opts.echoAllCommands)
 
-    discovered_tests = lit.discovery.find_tests_for_inputs(lit_config, opts.test_paths)
+    discovered_tests = lit.discovery.find_tests_for_inputs(lit_config, opts.test_paths,
+                                                           opts.indirectlyRunCheck)
     if not discovered_tests:
         sys.stderr.write('error: did not discover any tests for provided path(s)\n')
         sys.exit(2)
@@ -80,9 +81,13 @@ def main(builtin_params={}):
                              'error.\n')
             sys.exit(2)
 
+    # When running multiple shards, don't include skipped tests in the xunit
+    # output since merging the files will result in duplicates.
+    tests_for_report = discovered_tests
     if opts.shard:
         (run, shards) = opts.shard
         selected_tests = filter_by_shard(selected_tests, run, shards, lit_config)
+        tests_for_report = selected_tests
         if not selected_tests:
             sys.stderr.write('warning: shard does not contain any tests.  '
                              'Consider decreasing the number of shards.\n')
@@ -102,7 +107,7 @@ def main(builtin_params={}):
     print_results(discovered_tests, elapsed, opts)
 
     for report in opts.reports:
-        report.write_results(discovered_tests, elapsed)
+        report.write_results(tests_for_report, elapsed)
 
     if lit_config.numErrors:
         sys.stderr.write('\n%d error(s) in tests\n' % lit_config.numErrors)
@@ -150,16 +155,16 @@ def print_discovered(tests, show_suites, show_tests):
 
 
 def determine_order(tests, order):
-    assert order in ['default', 'random', 'failing-first']
-    if order == 'default':
+    from lit.cl_arguments import TestOrder
+    if order == TestOrder.EARLY_TESTS_THEN_BY_NAME:
         tests.sort(key=lambda t: (not t.isEarlyTest(), t.getFullName()))
-    elif order == 'random':
-        import random
-        random.shuffle(tests)
-    else:
+    elif order == TestOrder.FAILING_FIRST:
         def by_mtime(test):
             return os.path.getmtime(test.getFilePath())
         tests.sort(key=by_mtime, reverse=True)
+    elif order == TestOrder.RANDOM:
+        import random
+        random.shuffle(tests)
 
 
 def touch_file(test):
@@ -174,14 +179,12 @@ def filter_by_shard(tests, run, shards, lit_config):
     # For clarity, generate a preview of the first few test indices in the shard
     # to accompany the arithmetic expression.
     preview_len = 3
-    preview = ", ".join([str(i + 1) for i in test_ixs[:preview_len]])
+    preview = ', '.join([str(i + 1) for i in test_ixs[:preview_len]])
     if len(test_ixs) > preview_len:
-        preview += ", ..."
-    # TODO(python3): string interpolation
-    msg = 'Selecting shard {run}/{shards} = size {sel_tests}/{total_tests} = ' \
-          'tests #({shards}*k)+{run} = [{preview}]'.format(
-              run=run, shards=shards, sel_tests=len(selected_tests),
-              total_tests=len(tests), preview=preview)
+        preview += ', ...'
+    msg = f'Selecting shard {run}/{shards} = ' \
+          f'size {len(selected_tests)}/{len(tests)} = ' \
+          f'tests #({shards}*k)+{run} = [{preview}]'
     lit_config.note(msg)
     return selected_tests
 
@@ -200,7 +203,7 @@ def run_tests(tests, lit_config, opts, discovered_tests):
 
     def progress_callback(test):
         display.update(test)
-        if opts.order == 'failing-first':
+        if opts.order == lit.cl_arguments.TestOrder.FAILING_FIRST:
             touch_file(test)
 
     run = lit.run.Run(tests, lit_config, workers, progress_callback,

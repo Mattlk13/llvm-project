@@ -40,6 +40,18 @@ constexpr uint32_t FunctionSummary::ParamAccess::RangeWidth;
 FunctionSummary FunctionSummary::ExternalNode =
     FunctionSummary::makeDummyFunctionSummary({});
 
+GlobalValue::VisibilityTypes ValueInfo::getELFVisibility() const {
+  bool HasProtected = false;
+  for (const auto &S : make_pointee_range(getSummaryList())) {
+    if (S.getVisibility() == GlobalValue::HiddenVisibility)
+      return GlobalValue::HiddenVisibility;
+    if (S.getVisibility() == GlobalValue::ProtectedVisibility)
+      HasProtected = true;
+  }
+  return HasProtected ? GlobalValue::ProtectedVisibility
+                      : GlobalValue::DefaultVisibility;
+}
+
 bool ValueInfo::isDSOLocal() const {
   // Need to check all summaries are local in case of hash collisions.
   return getSummaryList().size() &&
@@ -163,7 +175,9 @@ bool ModuleSummaryIndex::isGUIDLive(GlobalValue::GUID GUID) const {
   return false;
 }
 
-static void propagateAttributesToRefs(GlobalValueSummary *S) {
+static void
+propagateAttributesToRefs(GlobalValueSummary *S,
+                          DenseSet<ValueInfo> &MarkedNonReadWriteOnly) {
   // If reference is not readonly or writeonly then referenced summary is not
   // read/writeonly either. Note that:
   // - All references from GlobalVarSummary are conservatively considered as
@@ -174,6 +188,11 @@ static void propagateAttributesToRefs(GlobalValueSummary *S) {
   //   for them.
   for (auto &VI : S->refs()) {
     assert(VI.getAccessSpecifier() == 0 || isa<FunctionSummary>(S));
+    if (!VI.getAccessSpecifier()) {
+      if (!MarkedNonReadWriteOnly.insert(VI).second)
+        continue;
+    } else if (MarkedNonReadWriteOnly.contains(VI))
+      continue;
     for (auto &Ref : VI.getSummaryList())
       // If references to alias is not read/writeonly then aliasee
       // is not read/writeonly
@@ -216,11 +235,24 @@ void ModuleSummaryIndex::propagateAttributes(
     const DenseSet<GlobalValue::GUID> &GUIDPreservedSymbols) {
   if (!PropagateAttrs)
     return;
+  DenseSet<ValueInfo> MarkedNonReadWriteOnly;
   for (auto &P : *this)
     for (auto &S : P.second.SummaryList) {
-      if (!isGlobalValueLive(S.get()))
+      if (!isGlobalValueLive(S.get())) {
+        // computeDeadSymbols should have marked all copies live. Note that
+        // it is possible that there is a GUID collision between internal
+        // symbols with the same name in different files of the same name but
+        // not enough distinguishing path. Because computeDeadSymbols should
+        // conservatively mark all copies live we can assert here that all are
+        // dead if any copy is dead.
+        assert(llvm::none_of(
+            P.second.SummaryList,
+            [&](const std::unique_ptr<GlobalValueSummary> &Summary) {
+              return isGlobalValueLive(Summary.get());
+            }));
         // We don't examine references from dead objects
-        continue;
+        break;
+      }
 
       // Global variable can't be marked read/writeonly if it is not eligible
       // to import since we need to ensure that all external references get
@@ -240,7 +272,7 @@ void ModuleSummaryIndex::propagateAttributes(
           GVS->setReadOnly(false);
           GVS->setWriteOnly(false);
         }
-      propagateAttributesToRefs(S.get());
+      propagateAttributesToRefs(S.get(), MarkedNonReadWriteOnly);
     }
   setWithAttributePropagation();
   if (llvm::AreStatisticsEnabled())
@@ -544,6 +576,8 @@ void ModuleSummaryIndex::exportToDot(
         if (Flags.Live && hasConstantFlag(SummaryIt.second))
           A.addComment("constant");
       }
+      if (Flags.Visibility)
+        A.addComment("visibility");
       if (Flags.DSOLocal)
         A.addComment("dsoLocal");
       if (Flags.CanAutoHide)

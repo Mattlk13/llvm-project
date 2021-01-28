@@ -90,7 +90,6 @@ class TestVSCode_attach(lldbvscode_testcase.VSCodeTestCaseBase):
         self.addTearDownHook(cleanup)
 
         popen = self.spawnSubprocess(program, [pid_file_path])
-        self.addTearDownHook(self.cleanupSubprocesses)
 
         pid = lldbutil.wait_for_file_on_target(self, pid_file_path)
 
@@ -146,7 +145,7 @@ class TestVSCode_attach(lldbvscode_testcase.VSCodeTestCaseBase):
         # and use it for debugging
         attachCommands = [
             'target create -d "%s"' % (program),
-            'process launch'
+            'process launch --stop-at-entry'
         ]
         initCommands = ['target list', 'platform list']
         preRunCommands = ['image list a.out', 'image dump sections a.out']

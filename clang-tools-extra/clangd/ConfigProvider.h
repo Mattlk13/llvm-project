@@ -18,8 +18,10 @@
 #define LLVM_CLANG_TOOLS_EXTRA_CLANGD_CONFIGPROVIDER_H
 
 #include "llvm/ADT/FunctionExtras.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/SourceMgr.h"
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -34,11 +36,18 @@ struct Params {
   /// Absolute path to a source file we're applying the config to. Unix slashes.
   /// Empty if not configuring a particular file.
   llvm::StringRef Path;
+  /// Hint that stale data is OK to improve performance (e.g. avoid IO).
+  /// FreshTime sets a bound for how old the data can be.
+  /// By default, providers should validate caches against the data source.
+  std::chrono::steady_clock::time_point FreshTime =
+      std::chrono::steady_clock::time_point::max();
 };
 
 /// Used to report problems in parsing or interpreting a config.
 /// Errors reflect structurally invalid config that should be user-visible.
 /// Warnings reflect e.g. unknown properties that are recoverable.
+/// Notes are used to report files and fragments.
+/// (This can be used to track when previous warnings/errors have been "fixed").
 using DiagnosticCallback = llvm::function_ref<void(const llvm::SMDiagnostic &)>;
 
 /// A chunk of configuration that has been fully analyzed and is ready to apply.
@@ -56,8 +65,10 @@ class Provider {
 public:
   virtual ~Provider() = default;
 
-  // Reads fragments from a single YAML file with a fixed path.
-  static std::unique_ptr<Provider> fromYAMLFile(llvm::StringRef AbsPathPath,
+  /// Reads fragments from a single YAML file with a fixed path. If non-empty,
+  /// Directory will be used to resolve relative paths in the fragments.
+  static std::unique_ptr<Provider> fromYAMLFile(llvm::StringRef AbsPath,
+                                                llvm::StringRef Directory,
                                                 const ThreadsafeFS &);
   // Reads fragments from YAML files found relative to ancestors of Params.Path.
   //
@@ -71,8 +82,7 @@ public:
 
   /// A provider that includes fragments from all the supplied providers.
   /// Order is preserved; later providers take precedence over earlier ones.
-  static std::unique_ptr<Provider>
-      combine(std::vector<std::unique_ptr<Provider>>);
+  static std::unique_ptr<Provider> combine(std::vector<const Provider *>);
 
   /// Build a config based on this provider.
   Config getConfig(const Params &, DiagnosticCallback) const;
